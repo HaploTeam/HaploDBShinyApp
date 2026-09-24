@@ -9,6 +9,7 @@ create_postgres_conn <- function() {
     port = Sys.getenv("DB_PORT"),
     user = Sys.getenv("DB_USER"),
     password = Sys.getenv("DB_PASSWORD"),
+    sslmode = "require",
     minSize = 0,
     maxSize = 10
   )
