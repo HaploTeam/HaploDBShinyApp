@@ -102,6 +102,97 @@ validate_strains <- function(df, db_conn) {
   list(valid = length(errors) == 0, errors = errors)
 }
 
+#' Validate YJS strain combined rows
+#'
+#' @param strain_df Data frame of strain rows to validate
+#' @param yjs_df Data frame of yjs rows to validate
+#' @param db_conn Database connection
+#' @return List with valid (logical) and errors (character vector)
+validate_combined <- function(
+  strain_df,
+  yjs_df,
+  db_conn, 
+  check_strains = TRUE
+) {
+
+  if (check_strains) {
+
+    strain_result <- validate_strains(
+      strain_df,
+      db_conn
+    )
+
+    errors <- strain_result$errors
+
+  } else {
+
+    errors <- character(0)
+
+  }
+
+  names(yjs_df) <- tolower(names(yjs_df))
+
+  for (i in seq_len(nrow(yjs_df))) {
+
+    row_prefix <- sprintf("Row %d: ", i)
+
+    if (is.na(yjs_df$sample_name[i]) ||
+        nchar(trimws(as.character(yjs_df$sample_name[i]))) == 0) {
+      errors <- c(
+        errors,
+        paste0(row_prefix, "sample_name is required.")
+      )
+    }
+
+    has_box <- !is.na(yjs_df$box_number[i])
+
+    has_plate <- !is.na(yjs_df$plate[i]) &&
+      !is.na(yjs_df$plate_row[i]) &&
+      !is.na(yjs_df$plate_col[i])
+
+    if (!has_box && !has_plate) {
+      errors <- c(
+        errors,
+        paste0(
+          row_prefix,
+          "At least box_number or plate location ",
+          "(plate + plate_row + plate_col) is required."
+        )
+      )
+    }
+
+    if (is.na(yjs_df$stocked_by[i]) ||
+        nchar(trimws(as.character(yjs_df$stocked_by[i]))) == 0) {
+
+      errors <- c(
+        errors,
+        paste0(row_prefix, "stocked_by is required.")
+      )
+    }
+
+    if (!is.na(yjs_df$ploidy[i]) &&
+        nchar(trimws(yjs_df$ploidy[i])) > 0 &&
+        !grepl("^\\d+n$", yjs_df$ploidy[i])) {
+
+      errors <- c(
+        errors,
+        paste0(
+          row_prefix,
+          "Invalid ploidy '",
+          yjs_df$ploidy[i],
+          "'. Expected format: <int>n"
+        )
+      )
+    }
+
+  }
+
+  list(
+    valid = length(errors) == 0,
+    errors = errors
+  )
+}
+
 #' Get next XTRA_ strain name by incrementing the 3-letter code
 #'
 #' @param db_conn Database connection
@@ -162,6 +253,52 @@ strain_columns <- function() {
     "continent", "country", "clade", "srr_id", "species")
 }
 
+combined_columns <- function() {
+
+  c(
+    # Name and species
+    "sample_name",
+    "species",
+
+    # Storage info
+    "stocked_by",
+    "box_number",
+    "box_row",
+    "box_col",
+    "plate",
+    "plate_row",
+    "plate_col",
+
+    # Origin info
+    "eco_origin",
+    "geo_origin",
+    "continent",
+    "country",
+    "isolation",
+
+    # Sequencing info
+    "srr_id",
+    "clade",
+
+    # YJS optional fields
+    "mating_type",
+    "ploidy",
+    "genotype",
+    "sporulation",
+    "external_origin",
+    "comments_origin",
+    "parental_origin",
+    "publication",
+    "strains_group",
+    "old_box",
+    "notes",
+    "comments",
+    "sample_type",
+    "collection"
+  )
+
+}
+
 # -- UI --
 
 add_entry_ui <- function(id) {
@@ -169,7 +306,75 @@ add_entry_ui <- function(id) {
   navset_card_tab(
     id = ns("subtab"),
     title = "Add Entries",
-    nav_panel("YJS Samples", value = "yjs",
+
+    nav_panel(
+      "Linked YJS Samples + Strains",
+      value = "combined",
+
+      layout_columns(
+        col_widths = c(4, 8),
+
+        card(
+          card_header("Upload Strains and YJS Samples"),
+
+          tags$div(
+            class = "alert alert-info",
+            icon("info-circle"),
+            "Upload a file containing both strain and YJS sample information. ",
+            "A provisional XTRA strain ID will be generated automatically and ",
+            "associated with the uploaded YJS sample."
+          ),
+
+          fileInput(
+            ns("combined_file"),
+            "Upload TSV/CSV file",
+            accept = c(".tsv", ".csv", ".txt")
+          ),
+
+          tags$small(
+            class = "text-muted",
+            "One row corresponds to one strain and one linked YJS sample."
+          ),
+
+          tags$hr(),
+
+          actionButton(
+            ns("combined_preview_btn"),
+            "Preview",
+            class = "btn-outline-primary me-2"
+          ),
+
+          actionButton(
+            ns("combined_submit_btn"),
+            "Submit",
+            class = "btn-primary"
+          ),
+
+          tags$div(
+            class = "mt-2",
+            downloadButton(
+              ns("combined_template"),
+              "Download Template",
+              class = "btn-sm btn-outline-secondary"
+            )
+          )
+        ),
+
+        card(
+          card_header("Submission Preview"),
+
+          uiOutput(
+            ns("combined_feedback")
+          ),
+
+          DT::dataTableOutput(
+            ns("combined_preview_table")
+          )
+        )
+      )
+    ),
+
+    nav_panel("YJS Samples only", value = "yjs",
       layout_columns(
         col_widths = c(4, 8),
         card(
@@ -277,7 +482,8 @@ add_entry_ui <- function(id) {
         )
       )
     ),
-    nav_panel("Strains", value = "strains",
+
+    nav_panel("Strains only", value = "strains",
       layout_columns(
         col_widths = c(4, 8),
         card(
@@ -345,6 +551,7 @@ add_entry_ui <- function(id) {
         )
       )
     )
+
   )
 }
 
@@ -395,6 +602,306 @@ add_entry_server <- function(id, db_conn, user_info) {
       req(input$subtab)
       refresh_choices()
     })
+
+    # ---- Combined YJS + Strain ----
+
+    combined_preview_data <- reactiveVal(NULL)
+
+    build_combined_from_file <- function() {
+
+      req(input$combined_file)
+
+      file_path <- input$combined_file$datapath
+      ext <- tools::file_ext(input$combined_file$name)
+
+      df <- if (ext %in% c("tsv", "txt")) {
+        read.delim(
+          file_path,
+          stringsAsFactors = FALSE,
+          na.strings = c("", "NA")
+        )
+      } else {
+        read.csv(
+          file_path,
+          stringsAsFactors = FALSE,
+          na.strings = c("", "NA")
+        )
+      }
+
+      expected <- combined_columns()
+
+      for (col in expected) {
+        if (!col %in% names(df)) {
+          df[[col]] <- NA
+        }
+      }
+
+      df[, expected, drop = FALSE]
+
+    }
+
+    combined_to_strain <- function(df) {
+
+      data.frame(
+        strain_name = df$sample_name,
+        isolation = df$isolation,
+        eco_origin = df$eco_origin,
+        geo_origin = df$geo_origin,
+        continent = df$continent,
+        country = df$country,
+        clade = df$clade,
+        srr_id = df$srr_id,
+        species = df$species,
+        stringsAsFactors = FALSE
+      )
+
+    }
+
+    combined_to_yjs <- function(df) {
+
+      data.frame(
+        sample_name = df$sample_name,
+        species = df$species,
+        mating_type = df$mating_type,
+        ploidy = df$ploidy,
+        genotype = df$genotype,
+        sporulation = df$sporulation,
+        external_origin = df$external_origin,
+        eco_origin = df$eco_origin,
+        comments_origin = df$comments_origin,
+        parental_origin = df$parental_origin,
+        publication = df$publication,
+        strains_group = df$strains_group,
+        old_box = df$old_box,
+        box_number = df$box_number,
+        box_row = df$box_row,
+        box_col = df$box_col,
+        plate = df$plate,
+        plate_row = df$plate_row,
+        plate_col = df$plate_col,
+        notes = df$notes,
+        stocked_by = df$stocked_by,
+        comments = df$comments,
+        sample_type = df$sample_type,
+        collection = df$collection,
+        stringsAsFactors = FALSE
+      )
+
+    }
+
+    # Preview from file upload
+    observeEvent(input$combined_preview_btn, {
+
+      tryCatch({
+
+        combined_df <- build_combined_from_file()
+
+        strain_df <- combined_to_strain(combined_df)
+
+        yjs_df <- combined_to_yjs(combined_df)
+
+        validation <- validate_combined(
+          strain_df,
+          yjs_df,
+          db_conn, 
+          check_strains = FALSE
+        )
+
+        combined_preview_data(
+          combined_df
+        )
+
+        if (!validation$valid) {
+
+          output$combined_feedback <- renderUI(
+            tags$div(
+              class = "alert alert-danger",
+              tags$strong("Validation errors:"),
+              tags$ul(
+                lapply(validation$errors, tags$li)
+              )
+            )
+          )
+
+        } else {
+
+          output$combined_feedback <- renderUI(
+            tags$div(
+              class = "alert alert-success",
+              sprintf(
+                "%d linked strain/sample pair(s) ready.",
+                nrow(combined_df)
+              )
+            )
+          )
+
+        }
+
+      }, error = function(e) {
+
+        output$combined_feedback <- renderUI(
+          tags$div(
+            class = "alert alert-danger",
+            paste("Error:", e$message)
+          )
+        )
+
+      })
+
+    })
+
+    output$combined_preview_table <- DT::renderDataTable({
+
+      req(combined_preview_data())
+
+      DT::datatable(
+        combined_preview_data(),
+        rownames = FALSE,
+        selection = "none",
+        options = list(
+          scrollX = TRUE,
+          scrollY = "400px",
+          paging = FALSE,
+          dom = "ti"
+        )
+      )
+
+    })
+
+    observeEvent(input$combined_submit_btn, {
+
+      req(user_info())
+      req(combined_preview_data())
+
+      combined_df <- combined_preview_data()
+
+      strain_df <- combined_to_strain(combined_df)
+
+      strain_df <- assign_xtra_names(strain_df)
+
+      yjs_df <- combined_to_yjs(combined_df)
+
+      yjs_df$id_strain <- strain_df$strain
+
+      validation <- validate_combined(
+        strain_df,
+        yjs_df,
+        db_conn
+      )
+
+      if (!validation$valid) {
+
+        output$combined_feedback <- renderUI(
+          tags$div(
+            class = "alert alert-danger",
+            tags$strong("Cannot submit — validation errors:"),
+            tags$ul(
+              lapply(validation$errors, tags$li)
+            )
+          )
+        )
+
+        return()
+
+      }
+
+      batch_id <- paste0(
+        format(Sys.time(), "%Y%m%d%H%M%S"),
+        "_",
+        sample(100000:999999, 1)
+      )
+
+      submission_groups <- sprintf(
+        "%s_%d",
+        batch_id,
+        seq_len(nrow(combined_df))
+      )
+
+      strain_df$submission_group <- submission_groups
+      yjs_df$submission_group <- submission_groups
+
+      strain_df$submitted_by <- user_info()$username
+      strain_df$submitted_at <- format(
+        Sys.time(),
+        "%Y-%m-%d %H:%M:%S"
+      )
+
+      yjs_df$submitted_by <- user_info()$username
+      yjs_df$submitted_at <- format(
+        Sys.time(),
+        "%Y-%m-%d %H:%M:%S"
+      )
+
+      yjs_df$yjs_number <- "PENDING"
+
+      tryCatch({
+
+        DBI::dbWriteTable(
+          db_conn,
+          "pending_strains",
+          strain_df,
+          append = TRUE,
+          row.names = FALSE
+        )
+
+        DBI::dbWriteTable(
+          db_conn,
+          "pending_yjs",
+          yjs_df,
+          append = TRUE,
+          row.names = FALSE
+        )
+
+        output$combined_feedback <- renderUI(
+          tags$div(
+            class = "alert alert-success",
+            sprintf(
+              "%d linked strain/sample pair(s) submitted.",
+              nrow(strain_df)
+            )
+          )
+        )
+
+        combined_preview_data(NULL)
+
+      }, error = function(e) {
+
+        output$combined_feedback <- renderUI(
+          tags$div(
+            class = "alert alert-danger",
+            paste("Submission error:", e$message)
+          )
+        )
+
+      })
+
+    })
+
+    output$combined_template <- downloadHandler(
+      filename = function() {
+        "combined_template.tsv"
+      },
+
+      content = function(file) {
+
+        template <- data.frame(
+          matrix(
+            ncol = length(combined_columns()),
+            nrow = 0
+          )
+        )
+
+        colnames(template) <- combined_columns()
+
+        write.table(
+          template,
+          file,
+          sep = "\t",
+          row.names = FALSE,
+          quote = FALSE
+        )
+      }
+    )
 
     # ---- YJS Samples ----
 
@@ -834,17 +1341,15 @@ add_entry_server <- function(id, db_conn, user_info) {
     }
 
     assign_xtra_names <- function(df) {
-      existing <- strain_list_data()
-      existing_xtra <- if (nrow(existing) > 0 && "strain" %in% names(existing)) {
-        grep("^XTRA_", existing$strain, value = TRUE)
-      } else {
-        character(0)
-      }
-      xtra_names <- next_xtra_names(db_conn, nrow(df),
-                                    extra_names = existing_xtra)
-      df$strain <- xtra_names
+
+      df$strain <- next_xtra_names(
+        db_conn,
+        nrow(df)
+      )
+
       df$original_name <- df$strain_name
       df$strain_name <- NULL
+
       df
     }
 

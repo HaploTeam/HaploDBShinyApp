@@ -190,41 +190,119 @@ review_server <- function(id, db_conn, user_info) {
 
       approved <- 0
       failed <- character(0)
+      processed_groups <- character(0)
+      total_linked_strains <- 0
+      total_linked_yjs <- 0
 
       for (i in seq_len(nrow(rows))) {
         row <- rows[i, , drop = FALSE]
         row_id <- row$id
 
         tryCatch({
-          if (table_name == "pending_yjs") {
-            assigned_yjs <- approve_yjs_row(row, db_conn)
-            create_notification(
-              db_conn, row$submitted_by, "YJS Sample",
-              row$sample_name, assigned_yjs, "approved", current_user,
-              box = row$box_number, box_row = row$box_row, box_col = row$box_col,
-              plate = row$plate, plate_row = row$plate_row, plate_col = row$plate_col
+          if (
+            "submission_group" %in% names(row) &&
+            !is.na(row$submission_group) &&
+            nzchar(row$submission_group)
+          ) {
+
+            if (row$submission_group %in% processed_groups) {
+              next
+            }
+
+            combined_result <- approve_combined_submission(
+              row$submission_group,
+              db_conn,
+              current_user
             )
+
+            processed_groups <- c(
+              processed_groups,
+              row$submission_group
+            )
+
+            total_linked_strains <- total_linked_strains +
+              combined_result$strain_count
+
+            total_linked_yjs <- total_linked_yjs +
+              combined_result$yjs_count
+
+          } else if (table_name == "pending_yjs") {
+
+            assigned_yjs <- approve_yjs_row(
+              row,
+              db_conn
+            )
+
+            create_notification(
+              db_conn,
+              row$submitted_by,
+              "YJS Sample",
+              row$sample_name,
+              assigned_yjs,
+              "approved",
+              current_user,
+              box = row$box_number,
+              box_row = row$box_row,
+              box_col = row$box_col,
+              plate = row$plate,
+              plate_row = row$plate_row,
+              plate_col = row$plate_col
+            )
+
           } else if (table_name == "pending_strains") {
-            approve_strain_row(row, db_conn)
-            create_notification(
-              db_conn, row$submitted_by, "Strain",
-              row$original_name, row$strain, "approved", current_user
+
+            approve_strain_row(
+              row,
+              db_conn
             )
+
+            create_notification(
+              db_conn,
+              row$submitted_by,
+              "Strain",
+              row$original_name,
+              row$strain,
+              "approved",
+              current_user
+            )
+
           }
+
           approved <- approved + 1
         }, error = function(e) {
           failed <<- c(failed, sprintf("Row %s: %s", as.character(row_id), conditionMessage(e)))
         })
       }
 
-      msg <- sprintf("%d row(s) approved.", approved)
+      msg_parts <- c(
+        sprintf("%d approval operation(s) completed.", approved)
+      )
+
+      if (total_linked_strains > 0 || total_linked_yjs > 0) {
+
+        msg_parts <- c(
+          msg_parts,
+          sprintf(
+            "Approved %d strain(s) and %d YJS sample(s) from linked submission(s).",
+            total_linked_strains,
+            total_linked_yjs
+          )
+        )
+
+      }
+
+      msg <- paste(
+        msg_parts,
+        collapse = "<br>"
+      )
+
       if (length(failed) > 0) {
         msg <- paste(msg, "Failures:", paste(failed, collapse = "; "))
       }
 
       output$review_feedback <- renderUI(
         tags$div(class = if (length(failed) > 0) "alert alert-warning mt-2" else "alert alert-success mt-2",
-                 msg)
+                 HTML(msg))
       )
       load_pending()
     })
@@ -241,42 +319,144 @@ review_server <- function(id, db_conn, user_info) {
       }
 
       df <- pending_data()
-      ids <- df$id[selected]
       table_name <- input$pending_table
 
       rows <- df[selected, , drop = FALSE]
       current_user <- user_info()$username
 
+      processed_groups <- character(0)
+      reject_messages <- character(0)
+      ids_to_delete <- integer(0)
+      total_linked_strains_rejected <- 0
+      total_linked_yjs_rejected <- 0
+      rejected <- 0
+
       for (i in seq_len(nrow(rows))) {
         row <- rows[i, , drop = FALSE]
         entry_name <- if (table_name == "pending_yjs") row$sample_name else row$original_name
         entry_type <- if (table_name == "pending_yjs") "YJS Sample" else "Strain"
-        if (table_name == "pending_yjs") {
+
+        if (
+          "submission_group" %in% names(row) &&
+          !is.na(row$submission_group) &&
+          nzchar(row$submission_group)
+        ) {
+
+          if (row$submission_group %in% processed_groups) {
+            next
+          }
+
+          result <- reject_combined_submission(
+            row$submission_group,
+            db_conn,
+            current_user
+          )
+
+          processed_groups <- c(
+            processed_groups,
+            row$submission_group
+          )
+
+          total_linked_strains_rejected <-
+            total_linked_strains_rejected +
+            result$strain_count
+
+          total_linked_yjs_rejected <-
+            total_linked_yjs_rejected +
+            result$yjs_count
+
+          rejected <- rejected + 1
+
+          next
+
+        } else if (table_name == "pending_yjs") {
+
+          ids_to_delete <- c(
+            ids_to_delete,
+            row$id
+          )
+
           create_notification(
             db_conn, row$submitted_by, entry_type,
             entry_name, NA_character_, "rejected", current_user,
             box = row$box_number, box_row = row$box_row, box_col = row$box_col,
             plate = row$plate, plate_row = row$plate_row, plate_col = row$plate_col
           )
-        } else {
+
+          rejected <- rejected + 1
+
+        } else if (table_name == "pending_strains") {
+
+
+          ids_to_delete <- c(
+            ids_to_delete,
+            row$id
+          )
+          
           create_notification(
             db_conn, row$submitted_by, entry_type,
             entry_name, NA_character_, "rejected", current_user
           )
+
+          rejected <- rejected + 1
         }
       }
 
-      placeholders <- paste0("$", seq_along(ids), collapse = ",")
-      DBI::dbExecute(
-        db_conn,
-        sprintf("DELETE FROM %s WHERE id IN (%s)", table_name, placeholders),
-        params = as.list(ids)
+      if (length(ids_to_delete) > 0) {
+
+        placeholders <- paste0(
+          "$",
+          seq_along(ids_to_delete),
+          collapse = ","
+        )
+
+        DBI::dbExecute(
+          db_conn,
+          sprintf(
+            "DELETE FROM %s WHERE id IN (%s)",
+            table_name,
+            placeholders
+          ),
+          params = as.list(ids_to_delete)
+        )
+
+      }
+
+      msg_parts <- c(
+        sprintf(
+          "%d rejection operation(s) completed.",
+          rejected
+        )
+      )
+
+      if (
+        total_linked_strains_rejected > 0 ||
+        total_linked_yjs_rejected > 0
+      ) {
+
+        msg_parts <- c(
+          msg_parts,
+          sprintf(
+            "Rejected %d strain(s) and %d YJS sample(s) from linked submission(s).",
+            total_linked_strains_rejected,
+            total_linked_yjs_rejected
+          )
+        )
+
+      }
+
+      msg <- paste(
+        msg_parts,
+        collapse = "<br>"
       )
 
       output$review_feedback <- renderUI(
-        tags$div(class = "alert alert-info mt-2",
-                 sprintf("%d row(s) rejected and removed.", length(ids)))
+        tags$div(
+          class = "alert alert-info mt-2",
+          HTML(msg)
+        )
       )
+
       load_pending()
     })
 
@@ -306,15 +486,17 @@ approve_yjs_row <- function(row, db_conn) {
   col_names <- paste(db_yjs_cols, collapse = ", ")
   sql <- sprintf("INSERT INTO yjs_numbers (%s) VALUES (%s)", col_names, placeholders)
 
-  pool::poolWithTransaction(db_conn, function(conn) {
+  DBI::dbExecute(
+    db_conn,
+    sql,
+    params = unname(as.list(insert_data))
+  )
 
-    DBI::dbExecute(conn, sql, params = unname(as.list(insert_data)))
-
-    DBI::dbExecute(conn,
-                  "DELETE FROM pending_yjs WHERE id = $1",
-                  params = list(row$id))
-  })
-
+  DBI::dbExecute(
+    db_conn,
+    "DELETE FROM pending_yjs WHERE id = $1",
+    params = list(row$id)
+  )
 
   assigned_yjs
 }
@@ -332,18 +514,226 @@ approve_strain_row <- function(row, db_conn) {
   col_names <- paste(db_strain_cols, collapse = ", ")
   sql <- sprintf("INSERT INTO strains (%s) VALUES (%s)", col_names, placeholders)
 
-  pool::poolWithTransaction(db_conn, function(conn) {
-    DBI::dbExecute(conn, sql, params = unname(as.list(insert_data)))
+  DBI::dbExecute(
+    db_conn,
+    sql,
+    params = unname(as.list(insert_data))
+  )
 
-    if (!is.na(row$original_name) && nchar(trimws(row$original_name)) > 0) {
+  if (!is.na(row$original_name) &&
+      nchar(trimws(row$original_name)) > 0) {
 
-      DBI::dbExecute(conn,
-                     "INSERT INTO alt_names (strain, alt_name) VALUES ($1, $2)",
-                     params = list(row$strain, row$original_name))
+    DBI::dbExecute(
+      db_conn,
+      "INSERT INTO alt_names (strain, alt_name) VALUES ($1, $2)",
+      params = list(row$strain, row$original_name)
+    )
+  }
+
+  DBI::dbExecute(
+    db_conn,
+    "DELETE FROM pending_strains WHERE id = $1",
+    params = list(row$id)
+  )
+}
+
+get_linked_pending_yjs <- function(
+  submission_group,
+  db_conn
+) {
+
+  DBI::dbGetQuery(
+    db_conn,
+    "
+    SELECT *
+    FROM pending_yjs
+    WHERE submission_group = $1
+    ",
+    params = list(submission_group)
+  )
+
+}
+
+approve_combined_submission <- function(
+  submission_group,
+  db_conn, 
+  reviewer
+) {
+
+  linked_strain <- DBI::dbGetQuery(
+    db_conn,
+    "
+    SELECT *
+    FROM pending_strains
+    WHERE submission_group = $1
+    ",
+    params = list(submission_group)
+  )
+
+  linked_yjs <- get_linked_pending_yjs(
+    submission_group,
+    db_conn
+  )
+
+  if (nrow(linked_strain) == 0) {
+    stop(
+      sprintf(
+        "No linked strain found for submission_group '%s'",
+        submission_group
+      )
+    )
+  }
+
+  if (nrow(linked_strain) > 1) {
+    stop(
+      sprintf(
+        "Multiple linked strains found for submission_group '%s'",
+        submission_group
+      )
+    )
+  }
+
+  assigned_yjs <- character(nrow(linked_yjs))
+
+  pool::poolWithTransaction(
+    db_conn,
+    function(conn) {
+
+      approve_strain_row(
+        linked_strain[1, , drop = FALSE],
+        conn
+      )
+
+      for (i in seq_len(nrow(linked_yjs))) {
+
+        assigned_yjs[i] <<- approve_yjs_row(
+          linked_yjs[i, , drop = FALSE],
+          conn
+        )
+
+      }
+
     }
+  )
 
-    DBI::dbExecute(conn,
-                  "DELETE FROM pending_strains WHERE id = $1",
-                  params = list(row$id))
-  })
+  create_notification(
+    db_conn,
+    linked_strain$submitted_by[1],
+    "Strain",
+    linked_strain$original_name[1],
+    linked_strain$strain[1],
+    "approved",
+    reviewer
+  )
+
+  for (i in seq_len(nrow(linked_yjs))) {
+
+    create_notification(
+      db_conn,
+      linked_yjs$submitted_by[i],
+      "YJS Sample",
+      linked_yjs$sample_name[i],
+      assigned_yjs[i],
+      "approved",
+      reviewer
+    )
+
+  }
+
+  list(
+    strain_count = nrow(linked_strain),
+    yjs_count = nrow(linked_yjs)
+  )
+}
+
+reject_combined_submission <- function(
+  submission_group,
+  db_conn,
+  reviewer
+) {
+
+  linked_strain <- DBI::dbGetQuery(
+    db_conn,
+    "
+    SELECT *
+    FROM pending_strains
+    WHERE submission_group = $1
+    ",
+    params = list(submission_group)
+  )
+
+  linked_yjs <- DBI::dbGetQuery(
+    db_conn,
+    "
+    SELECT *
+    FROM pending_yjs
+    WHERE submission_group = $1
+    ",
+    params = list(submission_group)
+  )
+
+  for (i in seq_len(nrow(linked_strain))) {
+
+    create_notification(
+      db_conn,
+      linked_strain$submitted_by[i],
+      "Strain",
+      linked_strain$original_name[i],
+      NA_character_,
+      "rejected",
+      reviewer
+    )
+
+  }
+
+  for (i in seq_len(nrow(linked_yjs))) {
+
+    create_notification(
+      db_conn,
+      linked_yjs$submitted_by[i],
+      "YJS Sample",
+      linked_yjs$sample_name[i],
+      NA_character_,
+      "rejected",
+      reviewer,
+      box = linked_yjs$box_number[i],
+      box_row = linked_yjs$box_row[i],
+      box_col = linked_yjs$box_col[i],
+      plate = linked_yjs$plate[i],
+      plate_row = linked_yjs$plate_row[i],
+      plate_col = linked_yjs$plate_col[i]
+    )
+
+  }
+
+  pool::poolWithTransaction(
+    db_conn,
+    function(conn) {
+
+      DBI::dbExecute(
+        conn,
+        "
+        DELETE FROM pending_strains
+        WHERE submission_group = $1
+        ",
+        params = list(submission_group)
+      )
+
+      DBI::dbExecute(
+        conn,
+        "
+        DELETE FROM pending_yjs
+        WHERE submission_group = $1
+        ",
+        params = list(submission_group)
+      )
+
+    }
+  )
+
+  list(
+    strain_count = nrow(linked_strain),
+    yjs_count = nrow(linked_yjs)
+  )
+
 }
